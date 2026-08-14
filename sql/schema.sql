@@ -2,15 +2,25 @@
 -- No users table yet (accounts are Phase 2) - candidate_profiles exist
 -- standalone for this proof-of-concept stage.
 
+-- Phase 2: real accounts
+CREATE TABLE IF NOT EXISTS users (
+    user_id SERIAL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS candidate_profiles (
     profile_id SERIAL PRIMARY KEY,
-    profile_name VARCHAR(200) NOT NULL,  -- human-readable label for this test stage, replaced by real user linkage in Phase 2
+    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    profile_name VARCHAR(200) NOT NULL,
     job_titles TEXT[] NOT NULL,
     locations TEXT[] NOT NULL,
     skills TEXT[] NOT NULL,
     years_experience INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_profiles_user_id ON candidate_profiles(user_id);
 
 CREATE TABLE IF NOT EXISTS candidate_languages (
     profile_id INTEGER NOT NULL REFERENCES candidate_profiles(profile_id) ON DELETE CASCADE,
