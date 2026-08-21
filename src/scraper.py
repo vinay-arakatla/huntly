@@ -7,8 +7,11 @@ original single-user pipeline, including every real-world fix found
 along the way:
   - linkedin_fetch_description=True (without it, LinkedIn results have
     empty descriptions, breaking skill/language extraction downstream)
-  - country_indeed="germany" (without it, Indeed silently searches the
-    US site and returns nothing relevant for German cities)
+  - country_indeed, derived per-search from that search's own location
+    (without it, Indeed silently searches the wrong country's site and
+    returns nothing relevant - this was hardcoded to "germany" during
+    initial development and only fixed once Huntly needed to genuinely
+    support locations outside Germany)
   - "site" / "interval" as the actual JobSpy column names, not the
     guessed-wrong "site_name" / "salary_interval"
 """
@@ -22,6 +25,34 @@ import psycopg2
 from jobspy import scrape_jobs
 
 from language_detector import detect_language_requirements
+
+
+def _extract_country_for_indeed(location: str) -> str:
+    """Derive JobSpy's country_indeed value from a free-text location
+    string, e.g. "Bangalore, India" -> "india", "Berlin, Germany" ->
+    "germany". Falls back to "germany" only when no country is stated
+    at all (e.g. a bare city name with no country) - matching this
+    project's original default, not a universal assumption.
+
+    A per-search value is important precisely because scoring is
+    deliberately country-agnostic (see language_detector.py) - the
+    scrape itself still needs to know which country's job site to
+    actually search, and that has to come from what each search's own
+    location says, not one global assumption.
+    """
+    if not location:
+        return "germany"
+    parts = [p.strip() for p in location.split(",") if p.strip()]
+    if len(parts) < 2:
+        return "germany"  # no country stated, e.g. "Berlin" alone
+
+    country = parts[-1].lower()
+    # A few common aliases in the form JobSpy actually expects
+    aliases = {
+        "uk": "uk", "united kingdom": "uk",
+        "usa": "usa", "us": "usa", "united states": "usa",
+    }
+    return aliases.get(country, country)
 
 
 def _get_active_search_combinations(cur) -> List[Tuple[str, str]]:
@@ -99,7 +130,7 @@ def scrape_for_active_profiles(conn_params: dict, results_wanted: int = 20) -> d
                     results_wanted=results_wanted,
                     hours_old=72,  # widen beyond 24h since this runs on-demand, not daily yet
                     linkedin_fetch_description=True,
-                    country_indeed="germany",
+                    country_indeed=_extract_country_for_indeed(location),
                 )
             except Exception as e:
                 # one search failing shouldn't stop the others - matches
