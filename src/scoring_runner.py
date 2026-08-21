@@ -164,7 +164,10 @@ def score_all_active_profiles(conn_params: dict) -> int:
 
 def get_scores_for_profile(conn_params: dict, profile_id: int) -> List[dict]:
     """Fetch a profile's scored matches, joined with job details, for
-    display on the dashboard."""
+    display on the dashboard. Returns every match regardless of
+    platform - platform is a display-time filter the user controls on
+    the results page itself, not a restriction baked into what gets
+    scored or stored."""
     conn = psycopg2.connect(**conn_params)
     try:
         cur = conn.cursor()
@@ -172,7 +175,7 @@ def get_scores_for_profile(conn_params: dict, profile_id: int) -> List[dict]:
             """
             SELECT c.title_clean, c.company_clean, c.location_clean, c.job_url,
                    s.match_score, s.priority_level, s.matched_skills, s.missing_skills,
-                   s.language_penalty_applied
+                   s.language_penalty_applied, c.source_platform
             FROM user_job_scores s
             JOIN cleaned_job_postings c ON s.job_id = c.job_id
             WHERE s.profile_id = %s AND c.is_active = TRUE
@@ -182,7 +185,8 @@ def get_scores_for_profile(conn_params: dict, profile_id: int) -> List[dict]:
         )
         columns = [
             "title", "company", "location", "job_url", "match_score",
-            "priority_level", "matched_skills", "missing_skills", "language_penalty_applied",
+            "priority_level", "matched_skills", "missing_skills",
+            "language_penalty_applied", "source_platform",
         ]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
     finally:
