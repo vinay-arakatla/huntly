@@ -1,0 +1,5 @@
+streamlit>=1.30.0
+psycopg2-binary>=2.9.0
+bcrypt>=4.0.0
+python-jobspy==1.1.82
+pandas>=2.0.0

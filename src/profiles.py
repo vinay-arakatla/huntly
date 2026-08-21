@@ -15,6 +15,7 @@ class Profile:
     locations: List[str]
     skills: List[str]
     years_experience: int
+    platforms: List[str] = field(default_factory=lambda: ["linkedin", "indeed"])
     languages: Dict[str, str] = field(default_factory=dict)
 
 
@@ -27,19 +28,22 @@ def create_profile(
     skills: List[str],
     years_experience: int,
     languages: Dict[str, str],
+    platforms: Optional[List[str]] = None,
 ) -> int:
     """Create a new profile for a user. Returns the new profile_id."""
+    platforms = platforms or ["linkedin", "indeed"]
+
     conn = psycopg2.connect(**conn_params)
     try:
         cur = conn.cursor()
         cur.execute(
             """
             INSERT INTO candidate_profiles
-                (user_id, profile_name, job_titles, locations, skills, years_experience)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (user_id, profile_name, job_titles, locations, skills, years_experience, platforms)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING profile_id
             """,
-            (user_id, profile_name, job_titles, locations, skills, years_experience),
+            (user_id, profile_name, job_titles, locations, skills, years_experience, platforms),
         )
         profile_id = cur.fetchone()[0]
 
@@ -64,7 +68,8 @@ def get_profiles_for_user(conn_params: dict, user_id: int) -> List[Profile]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT profile_id, user_id, profile_name, job_titles, locations, skills, years_experience
+            SELECT profile_id, user_id, profile_name, job_titles, locations, skills,
+                   years_experience, platforms
             FROM candidate_profiles WHERE user_id = %s ORDER BY created_at DESC
             """,
             (user_id,),
@@ -72,7 +77,7 @@ def get_profiles_for_user(conn_params: dict, user_id: int) -> List[Profile]:
         rows = cur.fetchall()
 
         profiles = []
-        for profile_id, uid, name, titles, locs, skills, years_exp in rows:
+        for profile_id, uid, name, titles, locs, skills, years_exp, platforms in rows:
             cur.execute(
                 "SELECT language, proficiency FROM candidate_languages WHERE profile_id = %s",
                 (profile_id,),
@@ -81,7 +86,8 @@ def get_profiles_for_user(conn_params: dict, user_id: int) -> List[Profile]:
             profiles.append(Profile(
                 profile_id=profile_id, user_id=uid, profile_name=name,
                 job_titles=titles, locations=locs, skills=skills,
-                years_experience=years_exp, languages=languages,
+                years_experience=years_exp, platforms=platforms or ["linkedin", "indeed"],
+                languages=languages,
             ))
         return profiles
     finally:

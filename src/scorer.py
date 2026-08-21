@@ -1,11 +1,11 @@
 """Score cleaned job postings against a candidate profile.
 
 Fresh implementation for Huntly - conceptually similar to the original
-project's scoring approach (skill match + title fit + language fit +
-experience fit), but every candidate-specific value comes from a
-CandidateProfile object passed in, not a single global .env profile.
-The same job pool can be scored against as many different profiles as
-needed, independently.
+project's scoring approach (skill match + title fit + seniority fit +
+language fit + experience fit), but every candidate-specific value
+comes from a CandidateProfile object passed in, not a single global
+.env profile. The same job pool can be scored against as many
+different profiles as needed, independently.
 """
 
 from dataclasses import dataclass, field
@@ -21,6 +21,7 @@ class CandidateProfile:
     profile_id: int
     skills: List[str]
     years_experience: int
+    job_titles: List[str] = field(default_factory=list)
     languages: Dict[str, str] = field(default_factory=dict)  # {"English": "Native", "German": "B1"}
 
 
@@ -32,6 +33,7 @@ class JobPosting:
     title: str
     skills: List[str]
     language_requirements: List[Tuple[str, str]]  # [("German", "B1")]
+    seniority_level: str = "Not Specified"  # Junior, Mid-level, Senior, Not Specified
 
 
 def calculate_skill_score(profile: CandidateProfile, job: JobPosting) -> Tuple[int, List[str], List[str]]:
@@ -79,10 +81,67 @@ def calculate_language_score(profile: CandidateProfile, job: JobPosting) -> Tupl
 
 
 def calculate_experience_score(profile: CandidateProfile) -> int:
-    """Simple experience-fit placeholder for Phase 1 - refined later
-    once real scraped experience-range data is wired in, matching the
-    original project's approach."""
+    """Simple experience-fit placeholder - a full posted-range comparison
+    (like the original project's exp_min/exp_max matching) is a later
+    step, once real scraped experience-range data is wired in."""
     return 10 if profile.years_experience >= 0 else 0
+
+
+def calculate_title_match_score(job_title: str, target_titles: List[str]) -> int:
+    """Title fit: does this job's title share meaningful words with any
+    of THIS profile's own target job titles?
+
+    Deliberately profile-relative, not a hardcoded keyword list like
+    "data analyst / BI analyst" - Huntly is multi-user, and different
+    people search for completely different roles. A hardcoded list
+    would only ever be correct for one person's job search, the same
+    mistake the single-profile original project's design would make if
+    reused here directly.
+    """
+    job_title_lower = (job_title or "").lower()
+    job_words = set(job_title_lower.split())
+
+    for target in target_titles:
+        target_words = set(target.lower().split())
+        if target_words & job_words:
+            return 10
+
+    return 0
+
+
+def calculate_seniority_score(seniority_level: str, years_experience: int) -> int:
+    """Seniority fit: relative to THIS profile's own years of
+    experience, not a fixed "Junior is always best" assumption.
+
+    A 0-2 year candidate wants Junior roles; a 7+ year candidate wants
+    Senior roles. Hardcoding "Junior is ideal" (as the single-profile
+    original project reasonably did, since that one person was early
+    career) would actively misscore an experienced candidate on a
+    multi-user product - it would reward exactly the roles a senior
+    candidate should probably skip.
+    """
+    if not seniority_level or seniority_level.lower() == "not specified":
+        return 0
+
+    if years_experience <= 2:
+        ideal = "junior"
+    elif years_experience <= 6:
+        ideal = "mid-level"
+    else:
+        ideal = "senior"
+
+    level = seniority_level.lower()
+    order = ["junior", "mid-level", "senior"]
+
+    if level == ideal:
+        return 20
+    if level not in order:
+        return 0
+
+    distance = abs(order.index(level) - order.index(ideal))
+    if distance == 1:
+        return 5  # adjacent level - not ideal, but not a bad fit either
+    return -10  # opposite ends (e.g. Junior candidate vs Senior role)
 
 
 def calculate_final_score(
@@ -90,11 +149,16 @@ def calculate_final_score(
     skill_gap_penalty: int,
     language_score: int,
     experience_score: int,
+    title_match_score: int,
+    seniority_score: int,
 ) -> int:
-    """Sum weighted components, clamp to 0-100 - same additive approach
-    as the original project (no double-weighting bug this time, since
-    it's designed in from the start rather than fixed after the fact)."""
-    total = skill_score + skill_gap_penalty + language_score + experience_score
+    """Sum weighted components, clamp to 0-100. Max achievable:
+    50 (skills) + 10 (title) + 20 (seniority) + 10 (language) +
+    10 (experience) = 100."""
+    total = (
+        skill_score + skill_gap_penalty + language_score + experience_score
+        + title_match_score + seniority_score
+    )
     return max(0, min(100, int(total)))
 
 
@@ -107,14 +171,17 @@ def calculate_priority(score: int) -> str:
 
 
 def score_job_for_profile(profile: CandidateProfile, job: JobPosting) -> dict:
-    """Score one job against one profile - the core Phase 1 operation."""
+    """Score one job against one profile."""
     skill_score, matched, missing = calculate_skill_score(profile, job)
     skill_gap_penalty = calculate_skill_gap_penalty(missing)
     language_score, language_penalty_applied = calculate_language_score(profile, job)
     experience_score = calculate_experience_score(profile)
+    title_match_score = calculate_title_match_score(job.title, profile.job_titles)
+    seniority_score = calculate_seniority_score(job.seniority_level, profile.years_experience)
 
     final_score = calculate_final_score(
-        skill_score, skill_gap_penalty, language_score, experience_score
+        skill_score, skill_gap_penalty, language_score, experience_score,
+        title_match_score, seniority_score,
     )
     priority = calculate_priority(final_score)
 

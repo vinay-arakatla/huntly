@@ -20,15 +20,18 @@ def _get_connection(conn_params: dict):
     return psycopg2.connect(**conn_params)
 
 
-def signup(conn_params: dict, email: str, password: str) -> Tuple[Optional[int], str]:
+def signup(conn_params: dict, name: str, email: str, password: str) -> Tuple[Optional[int], str]:
     """Create a new user account.
 
     Returns:
         (user_id, message) - user_id is None if signup failed, with
         message explaining why.
     """
+    name = name.strip()
     email = email.strip().lower()
 
+    if not name:
+        return None, "Please enter your name."
     if not EMAIL_PATTERN.match(email):
         return None, "Please enter a valid email address."
     if len(password) < 8:
@@ -44,8 +47,8 @@ def signup(conn_params: dict, email: str, password: str) -> Tuple[Optional[int],
             return None, "An account with this email already exists."
 
         cur.execute(
-            "INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING user_id",
-            (email, password_hash),
+            "INSERT INTO users (name, email, password_hash) VALUES (%s, %s, %s) RETURNING user_id",
+            (name, email, password_hash),
         )
         user_id = cur.fetchone()[0]
         conn.commit()
@@ -54,26 +57,26 @@ def signup(conn_params: dict, email: str, password: str) -> Tuple[Optional[int],
         conn.close()
 
 
-def login(conn_params: dict, email: str, password: str) -> Tuple[Optional[int], str]:
-    """Verify credentials and return the user_id if they're correct.
+def login(conn_params: dict, email: str, password: str) -> Tuple[Optional[int], Optional[str], str]:
+    """Verify credentials and return the user_id and name if correct.
 
     Returns:
-        (user_id, message) - user_id is None if login failed.
+        (user_id, name, message) - user_id and name are None if login failed.
     """
     email = email.strip().lower()
 
     conn = _get_connection(conn_params)
     try:
         cur = conn.cursor()
-        cur.execute("SELECT user_id, password_hash FROM users WHERE email = %s", (email,))
+        cur.execute("SELECT user_id, name, password_hash FROM users WHERE email = %s", (email,))
         row = cur.fetchone()
         if row is None:
-            return None, "No account found with this email."
+            return None, None, "No account found with this email."
 
-        user_id, password_hash = row
+        user_id, name, password_hash = row
         if not bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8")):
-            return None, "Incorrect password."
+            return None, None, "Incorrect password."
 
-        return user_id, "Logged in successfully."
+        return user_id, name, "Logged in successfully."
     finally:
         conn.close()
