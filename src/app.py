@@ -174,6 +174,27 @@ def show_profile_form():
 
     st.subheader("Create a New Search Profile" if existing_profiles else "Set Up Your Profile")
 
+    st.write("Languages")
+    st.caption(
+        "Select the languages you speak. Huntly currently checks job postings "
+        "for German and English requirements. If a posting doesn't state a "
+        "language requirement at all, it has no effect on your score - so if "
+        "you don't select German, for example, you will not lose points on "
+        "postings that never asked for it."
+    )
+    known_languages = st.multiselect("Which languages do you know?", ["German", "English"])
+
+    language_levels = {}
+    if known_languages:
+        level_cols = st.columns(len(known_languages))
+        for col, lang in zip(level_cols, known_languages):
+            with col:
+                default_index = 6 if lang == "English" else 2  # English defaults to Native, German to B1
+                language_levels[lang] = st.selectbox(
+                    f"{lang} level", ["A1", "A2", "B1", "B2", "C1", "C2", "Native"],
+                    index=default_index, key=f"level_{lang}",
+                )
+
     with st.form("profile_form"):
         profile_name = st.text_input("Profile Name", placeholder="e.g. Data Analyst Search")
         job_titles = st.text_input("Target Job Titles (comma-separated)", placeholder="Data Analyst, BI Analyst")
@@ -181,25 +202,12 @@ def show_profile_form():
         skills = st.text_input("Your Skills (comma-separated)", placeholder="SQL, Python, Power BI, ETL")
         years_experience = st.number_input("Years of Experience", min_value=0, max_value=50, value=0)
 
-        st.write("Language Proficiency")
-        col1, col2 = st.columns(2)
-        with col1:
-            german_level = st.selectbox("German", ["None", "A1", "A2", "B1", "B2", "C1", "C2", "Native"])
-        with col2:
-            english_level = st.selectbox("English", ["None", "A1", "A2", "B1", "B2", "C1", "C2", "Native"], index=7)
-
         submitted = st.form_submit_button("Save Profile")
 
         if submitted:
             if not profile_name or not job_titles or not skills:
                 st.error("Profile name, job titles, and skills are required fields.")
             else:
-                languages = {}
-                if german_level != "None":
-                    languages["German"] = german_level
-                if english_level != "None":
-                    languages["English"] = english_level
-
                 create_profile(
                     CONN_PARAMS,
                     st.session_state.user_id,
@@ -208,7 +216,7 @@ def show_profile_form():
                     locations=[l.strip() for l in locations.split(",") if l.strip()],
                     skills=[s.strip() for s in skills.split(",") if s.strip()],
                     years_experience=int(years_experience),
-                    languages=languages,
+                    languages=language_levels,
                 )
                 st.success("Profile saved successfully.")
                 st.rerun()
