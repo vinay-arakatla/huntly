@@ -115,6 +115,8 @@ def show_profile_form():
                 st.success(
                     f"Completed {summary['searches_run']} search(es) across your target roles and locations. "
                     f"Found {summary['jobs_found']} postings, {summary['jobs_new']} of which are new."
+                    + (f" Removed {summary['stale_jobs_deleted']} posting(s) older than a week."
+                       if summary.get("stale_jobs_deleted") else "")
                 )
                 if summary.get("errors"):
                     st.warning(f"{len(summary['errors'])} search(es) could not be completed. See application logs for details.")
@@ -132,7 +134,7 @@ def show_profile_form():
         if not results:
             st.info("No matches yet. Select 'Search for New Jobs' and then 'Recalculate Match Scores' to get started.")
         else:
-            filter_col1, filter_col2 = st.columns(2)
+            filter_col1, filter_col2, filter_col3 = st.columns(3)
             with filter_col1:
                 priority_filter = st.multiselect(
                     "Priority", ["High", "Medium", "Low"], default=["High", "Medium", "Low"]
@@ -145,12 +147,19 @@ def show_profile_form():
                     default=available_platforms,
                     format_func=lambda p: p.title(),
                 )
+            with filter_col3:
+                sort_by = st.selectbox("Sort By", ["Match Score", "Date Found"])
 
             filtered = [
                 r for r in results
                 if r["priority_level"] in priority_filter
                 and (r.get("source_platform") or "unknown") in platform_filter
             ]
+
+            if sort_by == "Date Found":
+                filtered.sort(key=lambda r: (r.get("job_fetch_date") is not None, r.get("job_fetch_date")), reverse=True)
+            else:
+                filtered.sort(key=lambda r: r["match_score"], reverse=True)
 
             st.caption(f"Showing {len(filtered)} of {len(results)} matches")
             for r in filtered:
@@ -160,7 +169,12 @@ def show_profile_form():
                         st.markdown(f"**{r['title']}** — {r['company']}")
                         location_line = r.get("location") or ""
                         platform_label = (r.get("source_platform") or "unknown").title()
-                        st.caption(f"{location_line}  •  Source: {platform_label}" if location_line else f"Source: {platform_label}")
+                        fetch_date = r.get("job_fetch_date")
+                        date_label = f"Found {fetch_date}" if fetch_date else "Date unknown"
+                        st.caption(
+                            f"{location_line}  •  Source: {platform_label}  •  {date_label}"
+                            if location_line else f"Source: {platform_label}  •  {date_label}"
+                        )
                         if r["matched_skills"]:
                             st.caption(f"Matched skills: {', '.join(r['matched_skills'])}")
                         if r["language_penalty_applied"]:

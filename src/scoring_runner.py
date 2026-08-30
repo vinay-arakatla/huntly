@@ -175,7 +175,7 @@ def get_scores_for_profile(conn_params: dict, profile_id: int) -> List[dict]:
             """
             SELECT c.title_clean, c.company_clean, c.location_clean, c.job_url,
                    s.match_score, s.priority_level, s.matched_skills, s.missing_skills,
-                   s.language_penalty_applied, c.source_platform
+                   s.language_penalty_applied, c.source_platform, c.job_fetch_date
             FROM user_job_scores s
             JOIN cleaned_job_postings c ON s.job_id = c.job_id
             WHERE s.profile_id = %s AND c.is_active = TRUE
@@ -186,8 +186,49 @@ def get_scores_for_profile(conn_params: dict, profile_id: int) -> List[dict]:
         columns = [
             "title", "company", "location", "job_url", "match_score",
             "priority_level", "matched_skills", "missing_skills",
-            "language_penalty_applied", "source_platform",
+            "language_penalty_applied", "source_platform", "job_fetch_date",
         ]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def delete_stale_jobs(conn_params: dict, days: int = 7) -> int:
+    """Permanently delete job postings older than N days (by
+    job_fetch_date), so the dataset doesn't grow unbounded and "what's
+    new" stays meaningful over time.
+
+    Deletion order matters here: cleaned_job_postings must be deleted
+    first - job_skills, job_language_requirements, and user_job_scores
+    all reference it with ON DELETE CASCADE, so those clean up
+    automatically. raw_job_postings, however, has no cascade from
+    cleaned_job_postings (the foreign key points the other way), so its
+    rows are deleted afterward, once nothing still references them.
+    Deleting raw_job_postings first would fail with a foreign key
+    violation while a cleaned row still points to it.
+
+    Returns the number of postings deleted.
+    """
+    conn = psycopg2.connect(**conn_params)
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT job_id, raw_job_id FROM cleaned_job_postings WHERE job_fetch_date < CURRENT_DATE - %s::int",
+            (days,),
+        )
+        stale = cur.fetchall()
+        if not stale:
+            return 0
+
+        stale_job_ids = [row[0] for row in stale]
+        stale_raw_ids = [row[1] for row in stale if row[1] is not None]
+
+        cur.execute("DELETE FROM cleaned_job_postings WHERE job_id = ANY(%s)", (stale_job_ids,))
+        if stale_raw_ids:
+            cur.execute("DELETE FROM raw_job_postings WHERE raw_job_id = ANY(%s)", (stale_raw_ids,))
+
+        conn.commit()
+        return len(stale_job_ids)
     finally:
         conn.close()

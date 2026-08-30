@@ -25,6 +25,7 @@ import psycopg2
 from jobspy import scrape_jobs
 
 from language_detector import detect_language_requirements
+from scoring_runner import delete_stale_jobs
 
 
 def _extract_country_for_indeed(location: str) -> str:
@@ -109,6 +110,14 @@ def scrape_for_active_profiles(conn_params: dict, results_wanted: int = 20) -> d
     summary = {"searches_run": 0, "jobs_found": 0, "jobs_new": 0}
     try:
         cur = conn.cursor()
+
+        # No separate scheduler exists yet, so cleanup piggybacks on the
+        # action a user already takes - each search first clears out
+        # anything older than a week, keeping "what's new" meaningful.
+        conn.commit()  # ensure a clean transaction boundary before a separate connection
+        deleted_count = delete_stale_jobs(conn_params, days=7)
+        summary["stale_jobs_deleted"] = deleted_count
+
         combos = _get_active_search_combinations(cur)
 
         for job_title, location in combos:
