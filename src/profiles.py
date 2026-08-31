@@ -59,6 +59,42 @@ def create_profile(
         conn.close()
 
 
+def update_profile(
+    conn_params: dict,
+    profile_id: int,
+    profile_name: str,
+    job_titles: List[str],
+    locations: List[str],
+    skills: List[str],
+    years_experience: int,
+    languages: Dict[str, str],
+) -> None:
+    """Update an existing profile in place, replacing its languages
+    entirely rather than trying to diff/merge them - simplest correct
+    approach for a small per-profile language set."""
+    conn = psycopg2.connect(**conn_params)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE candidate_profiles
+            SET profile_name = %s, job_titles = %s, locations = %s,
+                skills = %s, years_experience = %s
+            WHERE profile_id = %s
+            """,
+            (profile_name, job_titles, locations, skills, years_experience, profile_id),
+        )
+        cur.execute("DELETE FROM candidate_languages WHERE profile_id = %s", (profile_id,))
+        for language, level in languages.items():
+            cur.execute(
+                "INSERT INTO candidate_languages (profile_id, language, proficiency) VALUES (%s, %s, %s)",
+                (profile_id, language, level),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_profiles_for_user(conn_params: dict, user_id: int) -> List[Profile]:
     """Get every profile belonging to a user (usually just one, but the
     schema allows more - e.g. someone job-hunting in two different

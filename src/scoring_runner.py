@@ -173,9 +173,9 @@ def get_scores_for_profile(conn_params: dict, profile_id: int) -> List[dict]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT c.title_clean, c.company_clean, c.location_clean, c.job_url,
+            SELECT s.job_id, c.title_clean, c.company_clean, c.location_clean, c.job_url,
                    s.match_score, s.priority_level, s.matched_skills, s.missing_skills,
-                   s.language_penalty_applied, c.source_platform, c.job_fetch_date
+                   s.language_penalty_applied, c.source_platform, c.job_fetch_date, s.applied
             FROM user_job_scores s
             JOIN cleaned_job_postings c ON s.job_id = c.job_id
             WHERE s.profile_id = %s AND c.is_active = TRUE
@@ -184,11 +184,29 @@ def get_scores_for_profile(conn_params: dict, profile_id: int) -> List[dict]:
             (profile_id,),
         )
         columns = [
-            "title", "company", "location", "job_url", "match_score",
+            "job_id", "title", "company", "location", "job_url", "match_score",
             "priority_level", "matched_skills", "missing_skills",
-            "language_penalty_applied", "source_platform", "job_fetch_date",
+            "language_penalty_applied", "source_platform", "job_fetch_date", "applied",
         ]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def set_applied_status(conn_params: dict, profile_id: int, job_id: int, applied: bool) -> None:
+    """Mark (or unmark) a specific job as applied-to for a given profile."""
+    conn = psycopg2.connect(**conn_params)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE user_job_scores
+            SET applied = %s, applied_at = CASE WHEN %s THEN NOW() ELSE NULL END
+            WHERE profile_id = %s AND job_id = %s
+            """,
+            (applied, applied, profile_id, job_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 
