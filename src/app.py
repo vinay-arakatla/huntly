@@ -5,9 +5,10 @@ Run with: streamlit run app.py
 
 import streamlit as st
 
-from auth import signup, login
-from profiles import create_profile, get_profiles_for_user
-from scoring_runner import score_all_active_profiles, get_scores_for_profile
+from auth import signup, login, request_password_reset, confirm_password_reset
+from emailer import send_reset_code_email
+from profiles import create_profile, update_profile, get_profiles_for_user
+from scoring_runner import score_all_active_profiles, get_scores_for_profile, set_applied_status
 from scraper import scrape_for_active_profiles
 
 
@@ -35,7 +36,18 @@ def _get_conn_params() -> dict:
     )
 
 
+def _get_smtp_config() -> dict:
+    """SMTP settings for sending reset codes, from the same Streamlit
+    secrets pattern as the database connection. Returns an empty dict
+    if not configured - password reset requests will then correctly
+    report that email delivery isn't available, rather than crashing."""
+    if "smtp" in st.secrets:
+        return dict(st.secrets["smtp"])
+    return {}
+
+
 CONN_PARAMS = _get_conn_params()
+SMTP_CONFIG = _get_smtp_config()
 
 st.set_page_config(page_title="Huntly", page_icon="🎯")
 
@@ -49,7 +61,7 @@ def show_auth_screen():
     st.title("Huntly")
     st.caption("A personalized job matching platform.")
 
-    tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
+    tab_login, tab_signup, tab_reset = st.tabs(["Log In", "Sign Up", "Forgot Password?"])
 
     with tab_login:
         with st.form("login_form"):
@@ -80,6 +92,34 @@ def show_auth_screen():
                 else:
                     st.error(message)
 
+    with tab_reset:
+        st.write("Step 1: Request a reset code")
+        with st.form("request_reset_form"):
+            reset_email = st.text_input("Email Address", key="reset_email")
+            if st.form_submit_button("Send Reset Code"):
+                success, message, code = request_password_reset(CONN_PARAMS, reset_email)
+                if code and SMTP_CONFIG:
+                    sent = send_reset_code_email(SMTP_CONFIG, reset_email.strip().lower(), code)
+                    if not sent:
+                        st.warning("Could not send the reset email. Please try again later.")
+                elif code and not SMTP_CONFIG:
+                    st.warning("Email delivery is not configured on this deployment.")
+                st.info(message)
+
+        st.divider()
+        st.write("Step 2: Enter your code and a new password")
+        with st.form("confirm_reset_form"):
+            confirm_email = st.text_input("Email Address", key="confirm_reset_email")
+            reset_code = st.text_input("Reset Code")
+            new_password = st.text_input("New Password", type="password")
+            st.caption("Must be at least 8 characters.")
+            if st.form_submit_button("Reset Password"):
+                ok, message = confirm_password_reset(CONN_PARAMS, confirm_email, reset_code, new_password)
+                if ok:
+                    st.success(message)
+                else:
+                    st.error(message)
+
 
 def show_profile_form():
     st.title("Huntly")
@@ -94,16 +134,65 @@ def show_profile_form():
     existing_profiles = get_profiles_for_user(CONN_PARAMS, st.session_state.user_id)
 
     if existing_profiles:
-        st.subheader("Your Profile")
-        for p in existing_profiles:
-            with st.expander(p.profile_name, expanded=False):
-                st.write(f"**Job Titles:** {', '.join(p.job_titles)}")
-                st.write(f"**Locations:** {', '.join(p.locations)}")
-                st.write(f"**Skills:** {', '.join(p.skills)}")
-                st.write(f"**Years of Experience:** {p.years_experience}")
-                if p.languages:
-                    lang_str = ", ".join(f"{lang} ({level})" for lang, level in p.languages.items())
-                    st.write(f"**Languages:** {lang_str}")
+        st.subheader("Your Profiles")
+
+        if len(existing_profiles) > 1:
+            profile_names = [p.profile_name for p in existing_profiles]
+            selected_name = st.selectbox("Viewing profile", profile_names)
+            active_profile = next(p for p in existing_profiles if p.profile_name == selected_name)
+        else:
+            active_profile = existing_profiles[0]
+
+        with st.expander(f"View / Edit: {active_profile.profile_name}", expanded=False):
+            st.write(f"**Job Titles:** {', '.join(active_profile.job_titles)}")
+            st.write(f"**Locations:** {', '.join(active_profile.locations)}")
+            st.write(f"**Skills:** {', '.join(active_profile.skills)}")
+            st.write(f"**Years of Experience:** {active_profile.years_experience}")
+            if active_profile.languages:
+                lang_str = ", ".join(f"{lang} ({level})" for lang, level in active_profile.languages.items())
+                st.write(f"**Languages:** {lang_str}")
+
+            st.divider()
+            st.write("Edit this profile")
+            with st.form(f"edit_profile_form_{active_profile.profile_id}"):
+                edit_name = st.text_input("Profile Name", value=active_profile.profile_name)
+                edit_titles = st.text_input("Target Job Titles (comma-separated)", value=", ".join(active_profile.job_titles))
+                edit_locations = st.text_input("Target Locations (comma-separated)", value=", ".join(active_profile.locations))
+                edit_skills = st.text_input("Your Skills (comma-separated)", value=", ".join(active_profile.skills))
+                edit_years = st.number_input("Years of Experience", min_value=0, max_value=50, value=active_profile.years_experience)
+
+                edit_known_languages = st.multiselect(
+                    "Which languages do you know?", ["German", "English"],
+                    default=list(active_profile.languages.keys()),
+                )
+                edit_language_levels = {}
+                if edit_known_languages:
+                    edit_level_cols = st.columns(len(edit_known_languages))
+                    levels = ["A1", "A2", "B1", "B2", "C1", "C2", "Native"]
+                    for col, lang in zip(edit_level_cols, edit_known_languages):
+                        with col:
+                            current_level = active_profile.languages.get(lang, "Native" if lang == "English" else "B1")
+                            default_idx = levels.index(current_level) if current_level in levels else 0
+                            edit_language_levels[lang] = st.selectbox(
+                                f"{lang} level", levels, index=default_idx, key=f"edit_level_{lang}_{active_profile.profile_id}",
+                            )
+
+                if st.form_submit_button("Save Changes"):
+                    if not edit_name or not edit_titles or not edit_skills:
+                        st.error("Profile name, job titles, and skills are required fields.")
+                    else:
+                        update_profile(
+                            CONN_PARAMS, active_profile.profile_id,
+                            profile_name=edit_name,
+                            job_titles=[t.strip() for t in edit_titles.split(",") if t.strip()],
+                            locations=[l.strip() for l in edit_locations.split(",") if l.strip()],
+                            skills=[s.strip() for s in edit_skills.split(",") if s.strip()],
+                            years_experience=int(edit_years),
+                            languages=edit_language_levels,
+                        )
+                        st.success("Profile updated successfully.")
+                        st.rerun()
+
         st.divider()
 
         st.subheader("Your Job Matches")
@@ -128,8 +217,7 @@ def show_profile_form():
                     count = score_all_active_profiles(CONN_PARAMS)
                 st.success(f"Match scores updated successfully ({count} scored).")
 
-        primary_profile = existing_profiles[0]
-        results = get_scores_for_profile(CONN_PARAMS, primary_profile.profile_id)
+        results = get_scores_for_profile(CONN_PARAMS, active_profile.profile_id)
 
         if not results:
             st.info("No matches yet. Select 'Search for New Jobs' and then 'Recalculate Match Scores' to get started.")
@@ -150,10 +238,13 @@ def show_profile_form():
             with filter_col3:
                 sort_by = st.selectbox("Sort By", ["Match Score", "Date Found"])
 
+            hide_applied = st.checkbox("Hide jobs I've already applied to")
+
             filtered = [
                 r for r in results
                 if r["priority_level"] in priority_filter
                 and (r.get("source_platform") or "unknown") in platform_filter
+                and not (hide_applied and r.get("applied"))
             ]
 
             if sort_by == "Date Found":
@@ -182,7 +273,16 @@ def show_profile_form():
                     with col2:
                         st.metric("Score", r["match_score"])
                         st.caption(r["priority_level"])
-                    st.link_button("View Posting", r["job_url"])
+
+                    action_col1, action_col2 = st.columns(2)
+                    with action_col1:
+                        st.link_button("View Posting", r["job_url"])
+                    with action_col2:
+                        currently_applied = bool(r.get("applied"))
+                        button_label = "Mark as Not Applied" if currently_applied else "Mark as Applied"
+                        if st.button(button_label, key=f"applied_{r['job_id']}"):
+                            set_applied_status(CONN_PARAMS, active_profile.profile_id, r["job_id"], not currently_applied)
+                            st.rerun()
 
         st.divider()
 
