@@ -2,9 +2,14 @@ name: Scheduled Job Scrape
 
 on:
   schedule:
-    # Runs daily at 06:00 UTC. Adjust the cron expression to change
-    # the time - https://crontab.guru is useful for this.
-    - cron: "0 6 * * *"
+    # Runs daily at 09:00 UTC, which is 11:00 German time (CEST, UTC+2,
+    # in effect roughly late March - late October). During CET
+    # (UTC+1, winter), this shifts to 10:00 German time instead - GitHub
+    # Actions cron has no built-in daylight-saving awareness, so this
+    # would need updating to "0 10 * * *" for exact precision across
+    # the winter months if that hour matters. A 1-hour seasonal drift
+    # twice a year is an acceptable tradeoff otherwise.
+    - cron: "0 9 * * *"
   workflow_dispatch:
     # Allows triggering manually from the Actions tab, useful for
     # testing without waiting for the schedule.
