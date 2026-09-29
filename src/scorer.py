@@ -37,14 +37,32 @@ class JobPosting:
 
 
 def calculate_skill_score(profile: CandidateProfile, job: JobPosting) -> Tuple[int, List[str], List[str]]:
-    """Skill match: up to 50 points, 5 per matched skill (capped at 10)."""
+    """Skill match: up to 50 points, scaled by what fraction of the
+    skills THIS job actually asks for the candidate has.
+
+    Deliberately relative to the job's own detected skills, not a flat
+    5-points-per-match count capped at 50. A flat count punishes a
+    posting that only mentions one or two skills in prose (common for
+    business-facing ad copy, as opposed to a bullet-point requirements
+    list) even when the candidate has every one of them - a job that
+    mentions exactly the one skill the candidate has is a 100% match on
+    the skills it states, and should score like one, not like a job
+    that named ten skills and the candidate only had one.
+
+    A job with zero detected skills scores 0 here (no signal either
+    way) rather than being padded up - the caller's title/seniority/
+    language components still carry the score in that case.
+    """
     user_skills = set(s.lower() for s in profile.skills)
     job_skills = set(s.lower() for s in job.skills)
 
     matched = job_skills & user_skills
     missing = job_skills - user_skills
 
-    score = min(len(matched) * 5, 50)
+    if not job_skills:
+        return 0, [], []
+
+    score = round(50 * len(matched) / len(job_skills))
     return score, sorted(matched), sorted(missing)
 
 

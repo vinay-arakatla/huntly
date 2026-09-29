@@ -15,6 +15,44 @@ from language_detector import detect_language_requirements
 from scorer import CandidateProfile, JobPosting, score_job_for_profile
 
 
+def _skill_pattern(skill: str) -> str:
+    """Regex to find a skill's mentions in job text, tolerant of common
+    word-variant endings.
+
+    Bug this fixes: a job posting saying "Dashboards" or "Reports" in
+    prose was never credited to a candidate's stored "Dashboarding" /
+    "Reporting" skills (or vice versa), because the old exact
+    word-boundary match required the literal stored string to appear
+    verbatim. Real ad copy uses whichever grammatical form fits the
+    sentence, not necessarily the noun form a candidate typed into
+    their profile.
+
+    Multi-word skills ("Power BI") and skills with non-letter characters
+    keep exact whole-phrase matching - stemming is only applied to
+    single alphabetic words, and only when the resulting stem is long
+    enough to not start matching unrelated words (e.g. "R" or "Go"
+    must stay exact, or the pattern would match almost anything).
+    """
+    skill_lower = skill.lower()
+    if " " in skill_lower or not skill_lower.isalpha():
+        return r"\b" + re.escape(skill_lower) + r"\b"
+
+    stem = skill_lower
+    for suffix in ("ing", "ies", "ed", "es"):
+        if skill_lower.endswith(suffix) and len(skill_lower) - len(suffix) >= 3:
+            stem = skill_lower[: -len(suffix)]
+            break
+    else:
+        if skill_lower.endswith("s") and not skill_lower.endswith("ss") and len(skill_lower) >= 3:
+            stem = skill_lower[:-1]
+
+    if len(stem) < 3:
+        # too short to safely allow suffix variation (e.g. "R", "Go")
+        return r"\b" + re.escape(skill_lower) + r"\b"
+
+    return r"\b" + re.escape(stem) + r"(?:s|es|ed|ing)?\b"
+
+
 def detect_seniority_level(title: str, description: str) -> str:
     """Detect a job's seniority level from its title/description text.
 
@@ -90,9 +128,12 @@ def ensure_job_metadata(cur, job_id: int, title: str, description: str, known_sk
     future ones.
     """
     for skill in known_skills:
-        # Word-boundary match, not naive substring - "SQL" as a bare
-        # substring check would incorrectly match inside "PostgreSQL"
-        pattern = r"\b" + re.escape(skill.lower()) + r"\b"
+        # Word-boundary + word-variant match (see _skill_pattern) - not
+        # naive substring ("SQL" as a bare substring would incorrectly
+        # match inside "PostgreSQL") and not a rigid exact-string match
+        # either ("Dashboards" in the posting should still credit a
+        # candidate's stored "Dashboarding").
+        pattern = _skill_pattern(skill)
         if re.search(pattern, (description or "").lower()):
             cur.execute(
                 "INSERT INTO job_skills (job_id, skill_name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
