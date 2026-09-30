@@ -291,6 +291,22 @@ def ensure_job_metadata(cur, job_id: int, title: str, description: str, known_sk
     )
 
 
+def _ensure_schema_migrations(cur) -> None:
+    """Add columns this module depends on if they don't exist yet.
+
+    sql/schema.sql is the source of truth for a fresh database, but
+    there's no separate migration step run against an already-deployed
+    database (e.g. the Streamlit Cloud Postgres instance) - it only
+    gets whatever was there when it was first set up. Running these
+    same IF NOT EXISTS statements here too means a deploy of this code
+    self-heals the live schema instead of crashing with
+    UndefinedColumn until someone manually re-runs schema.sql by hand.
+    Cheap and idempotent - safe to run on every call.
+    """
+    cur.execute("ALTER TABLE cleaned_job_postings ADD COLUMN IF NOT EXISTS seniority_level VARCHAR(20)")
+    cur.execute("ALTER TABLE cleaned_job_postings ADD COLUMN IF NOT EXISTS required_years_experience INTEGER")
+
+
 def score_all_active_profiles(conn_params: dict) -> int:
     """Score every active profile against every active job in the shared
     pool, storing results in user_job_scores. Returns the number of
@@ -298,6 +314,9 @@ def score_all_active_profiles(conn_params: dict) -> int:
     conn = psycopg2.connect(**conn_params)
     try:
         cur = conn.cursor()
+
+        _ensure_schema_migrations(cur)
+        conn.commit()
 
         # every skill declared across all active profiles - the only
         # ones that could ever matter for scoring anyone right now
