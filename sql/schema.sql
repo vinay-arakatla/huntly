@@ -64,8 +64,14 @@ CREATE TABLE IF NOT EXISTS cleaned_job_postings (
     job_url VARCHAR(1000) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     job_fetch_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    seniority_level VARCHAR(20),  -- Junior, Mid-level, Senior, Not Specified - set by ensure_job_metadata
+    required_years_experience INTEGER,  -- minimum years stated in the posting text; NULL = none detected
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+-- Safe to re-run on an existing database: adds the columns above if this
+-- schema is being applied to a database created before they existed.
+ALTER TABLE cleaned_job_postings ADD COLUMN IF NOT EXISTS seniority_level VARCHAR(20);
+ALTER TABLE cleaned_job_postings ADD COLUMN IF NOT EXISTS required_years_experience INTEGER;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cleaned_job_url_unique ON cleaned_job_postings(job_url);
 CREATE INDEX IF NOT EXISTS idx_cleaned_job_fetch_date ON cleaned_job_postings(job_fetch_date);
 

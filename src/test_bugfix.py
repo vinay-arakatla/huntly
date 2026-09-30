@@ -7,8 +7,19 @@ fix doesn't overcorrect in the other direction.
 """
 import re
 
-from scorer import CandidateProfile, JobPosting, calculate_skill_score, score_job_for_profile
-from scoring_runner import _skill_pattern, detect_seniority_level
+from scorer import (
+    CandidateProfile,
+    JobPosting,
+    calculate_skill_score,
+    calculate_title_match_score,
+    score_job_for_profile,
+)
+from scoring_runner import (
+    _skill_pattern,
+    _skill_universe,
+    detect_seniority_level,
+    extract_required_years_experience,
+)
 from language_detector import detect_language_requirements
 
 PROFILE_SKILLS = [
@@ -128,3 +139,103 @@ for skill, text, should_match in safety_checks:
 
 print()
 print("ALL SAFETY CHECKS PASSED" if all_ok else "SOME SAFETY CHECKS FAILED")
+
+# --- Case 5: the Localization Engineer false-100 report ---
+# Reproduces the actual bug report: a "Localization Engineer" posting
+# (which shares nothing with this candidate's Data/BI background besides
+# the generic word "Engineer", and needs a stack this candidate barely
+# touches) was scoring 100/100 High before these fixes, driven by (a) the
+# title-match false positive on "Engineer" and (b) a skill denominator
+# limited to the two skills this profile happens to share with the
+# posting (Python, Docker) rather than the job's real requirements.
+data_profile = CandidateProfile(
+    profile_id=3,
+    skills=["Python", "SQL", "Apache Airflow", "PostgreSQL", "Power BI", "Tableau", "Docker", "ETL"],
+    years_experience=3,
+    job_titles=["Data Analyst", "Data Engineer", "BI Analyst"],
+    languages={"English": "C1", "German": "B2"},
+)
+loc_eng_description = """
+We are seeking a highly technical, hands-on Localization Engineer (LE) to
+build, automate, and optimize an internationalization (i18n) and
+localization (l10n) technical infrastructure within a Crowdin deployment,
+including custom parsers, REST APIs, webhooks, XLIFF, ICU message syntax,
+and Unicode handling. Required Qualifications: 6+ years of dedicated
+experience in Localization Engineering. Familiarity with containerization
+(Docker) and Python scripting for automation.
+"""
+loc_eng_known_skills = _skill_universe(data_profile.skills)
+loc_eng_skills = extract_job_skills(loc_eng_description, loc_eng_known_skills)
+loc_eng_required_years = extract_required_years_experience(loc_eng_description)
+loc_eng_job = JobPosting(
+    job_id=5, title="Localization Engineer", skills=loc_eng_skills,
+    language_requirements=detect_language_requirements(loc_eng_description),
+    seniority_level=detect_seniority_level("Localization Engineer", loc_eng_description),
+    required_years_experience=loc_eng_required_years,
+)
+loc_eng_result = score_job_for_profile(data_profile, loc_eng_job)
+print("=== Case 5: Localization Engineer vs Data/BI profile (the false-100 report) ===")
+print("Detected job skills (now includes baseline vocabulary, not just profile skills):", loc_eng_job.skills)
+print("Matched:", loc_eng_result["matched_skills"], "Missing:", loc_eng_result["missing_skills"])
+print("Title match score (Engineer/Engineer should no longer count):",
+      calculate_title_match_score(loc_eng_job.title, data_profile.job_titles))
+print("Required years detected:", loc_eng_required_years, "(candidate has", data_profile.years_experience, ")")
+print("Final score:", loc_eng_result["match_score"], loc_eng_result["priority_level"])
+assert loc_eng_result["match_score"] < 100, "Localization Engineer should NOT score 100 against this profile"
+assert calculate_title_match_score(loc_eng_job.title, data_profile.job_titles) == 0, \
+    "Title match should not fire on 'Engineer' alone"
+print("OK: no longer a bogus 100/100")
+print()
+
+# --- Case 6: title-match false positives from generic word overlap ---
+print("=== Case 6: title-match generic-word false positives ===")
+title_checks = [
+    ("Localization Engineer", ["Data Engineer"], 0),   # only "Engineer" overlaps - should NOT match
+    ("Senior Data Engineer", ["Data Engineer"], 10),    # "Data" overlaps - should match
+    ("Marketing Manager", ["Product Manager"], 0),      # only "Manager" overlaps - should NOT match
+    ("Engineer", ["Software Engineer"], 10),            # title is only a generic word - fallback overlap
+]
+title_ok = True
+for job_title, targets, expected in title_checks:
+    got = calculate_title_match_score(job_title, targets)
+    ok = got == expected
+    title_ok &= ok
+    print(f"  job_title={job_title!r:25} targets={targets!r:20} expected={expected} got={got} {'OK' if ok else 'FAIL'}")
+print("ALL TITLE CHECKS PASSED" if title_ok else "SOME TITLE CHECKS FAILED")
+print()
+
+# --- Case 7: seniority word-boundary false positives ---
+print("=== Case 7: seniority detection word-boundary safety checks ===")
+seniority_checks = [
+    ("Software Engineer", "We are a leading provider of international solutions.", "Not Specified"),
+    ("Backend Developer", "Work with our middleware and admit new ideas to the team.", "Not Specified"),
+    ("Data Analyst", "Diese Position ist Teil unseres internen Teams.", "Not Specified"),  # German "internen" (inflected) must not trigger Junior
+    ("Team Lead", "You will lead a team of engineers.", "Senior"),
+    ("Mid-level Engineer", "Looking for a mid-level developer.", "Mid-level"),
+    ("Software Engineering Intern", "Join us for a summer internship program.", "Junior"),
+]
+seniority_ok = True
+for title, description, expected in seniority_checks:
+    got = detect_seniority_level(title, description)
+    ok = got == expected
+    seniority_ok &= ok
+    print(f"  title={title!r:28} expected={expected!r:15} got={got!r:15} {'OK' if ok else 'FAIL'}")
+print("ALL SENIORITY CHECKS PASSED" if seniority_ok else "SOME SENIORITY CHECKS FAILED")
+print()
+
+# --- Case 8: required-years extraction and experience scoring ---
+print("=== Case 8: required-years extraction ===")
+years_checks = [
+    ("6+ years of dedicated experience in Localization Engineering.", 6),
+    ("5-7 years of experience required.", 5),
+    ("At least 3 years of experience.", 3),
+    ("We'd love someone with 4 years of experience in data.", 4),
+    ("No years requirement mentioned here at all.", None),
+]
+years_ok = True
+for text, expected in years_checks:
+    got = extract_required_years_experience(text)
+    ok = got == expected
+    years_ok &= ok
+    print(f"  text={text!r:65} expected={expected} got={got} {'OK' if ok else 'FAIL'}")
+print("ALL YEARS CHECKS PASSED" if years_ok else "SOME YEARS CHECKS FAILED")

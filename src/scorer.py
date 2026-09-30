@@ -34,6 +34,7 @@ class JobPosting:
     skills: List[str]
     language_requirements: List[Tuple[str, str]]  # [("German", "B1")]
     seniority_level: str = "Not Specified"  # Junior, Mid-level, Senior, Not Specified
+    required_years_experience: Optional[int] = None  # None = no years requirement detected in the text
 
 
 def calculate_skill_score(profile: CandidateProfile, job: JobPosting) -> Tuple[int, List[str], List[str]]:
@@ -98,11 +99,43 @@ def calculate_language_score(profile: CandidateProfile, job: JobPosting) -> Tupl
     return 10, False
 
 
-def calculate_experience_score(profile: CandidateProfile) -> int:
-    """Simple experience-fit placeholder - a full posted-range comparison
-    (like the original project's exp_min/exp_max matching) is a later
-    step, once real scraped experience-range data is wired in."""
-    return 10 if profile.years_experience >= 0 else 0
+def calculate_experience_score(profile: CandidateProfile, required_years: Optional[int] = None) -> int:
+    """Experience fit: compares the candidate's years against the job's
+    own stated years-of-experience requirement (extracted from the
+    posting text by the caller - see scoring_runner.extract_required_years_experience).
+
+    A job that states no years requirement at all keeps the old neutral
+    placeholder score (no signal either way). A job that states one is
+    now actually checked against - previously this was a flat +10
+    regardless of whether the candidate had 3 years and the job wanted
+    6+, which meant a real mismatch (e.g. this job's "6+ years" vs a
+    3-year candidate) was invisible to the score entirely.
+    """
+    if required_years is None:
+        return 10  # no requirement stated in the text - no basis to penalize
+
+    gap = required_years - profile.years_experience
+    if gap <= 0:
+        return 10  # candidate already meets or exceeds the stated requirement
+    if gap <= 2:
+        return 3  # a couple of years short - still a plausible, common fit
+    return -10  # well short of the stated requirement
+
+
+# Generic job-title words that appear across many unrelated roles and
+# therefore carry no signal about whether two titles are actually the
+# same *kind* of role - e.g. "Localization Engineer" and "Data Engineer"
+# share only "Engineer", which says nothing about role overlap. Without
+# stripping these, any two titles that happen to share a common
+# job-family word (Engineer, Analyst, Manager, Specialist, Consultant,
+# Lead...) count as a full title match regardless of domain.
+GENERIC_TITLE_WORDS = {
+    "engineer", "developer", "analyst", "manager", "specialist",
+    "consultant", "lead", "senior", "junior", "associate", "director",
+    "officer", "coordinator", "administrator", "architect", "designer",
+    "scientist", "staff", "principal", "head", "intern", "representative",
+    "ii", "iii", "i",
+}
 
 
 def calculate_title_match_score(job_title: str, target_titles: List[str]) -> int:
@@ -115,12 +148,31 @@ def calculate_title_match_score(job_title: str, target_titles: List[str]) -> int
     would only ever be correct for one person's job search, the same
     mistake the single-profile original project's design would make if
     reused here directly.
+
+    Generic job-family words (see GENERIC_TITLE_WORDS) are stripped
+    from both sides before comparing, so a match requires overlap on
+    the words that actually identify the role ("data", "localization",
+    "frontend", ...), not just a shared "Engineer"/"Analyst"/"Manager".
+    If stripping leaves one side with nothing to compare (the title was
+    only ever a generic word, e.g. just "Engineer"), fall back to the
+    raw overlap so a fully generic title can still match a fully
+    generic target rather than never matching anything.
     """
     job_title_lower = (job_title or "").lower()
     job_words = set(job_title_lower.split())
+    meaningful_job_words = job_words - GENERIC_TITLE_WORDS
 
     for target in target_titles:
         target_words = set(target.lower().split())
+        meaningful_target_words = target_words - GENERIC_TITLE_WORDS
+
+        if meaningful_job_words and meaningful_target_words:
+            if meaningful_job_words & meaningful_target_words:
+                return 10
+            continue  # both sides have real signal and it doesn't overlap - not a match
+
+        # one (or both) sides reduced to nothing but generic words -
+        # no domain-specific signal to compare, so fall back to raw overlap
         if target_words & job_words:
             return 10
 
@@ -193,7 +245,7 @@ def score_job_for_profile(profile: CandidateProfile, job: JobPosting) -> dict:
     skill_score, matched, missing = calculate_skill_score(profile, job)
     skill_gap_penalty = calculate_skill_gap_penalty(missing)
     language_score, language_penalty_applied = calculate_language_score(profile, job)
-    experience_score = calculate_experience_score(profile)
+    experience_score = calculate_experience_score(profile, job.required_years_experience)
     title_match_score = calculate_title_match_score(job.title, profile.job_titles)
     seniority_score = calculate_seniority_score(job.seniority_level, profile.years_experience)
 

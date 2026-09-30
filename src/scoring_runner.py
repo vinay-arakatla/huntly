@@ -7,12 +7,109 @@ something real to show without needing the full pipeline built yet.
 """
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import psycopg2
 
 from language_detector import detect_language_requirements
 from scorer import CandidateProfile, JobPosting, score_job_for_profile
+
+
+# Baseline skill vocabulary scanned for on every job, independent of what
+# any candidate profile has declared.
+#
+# Bug this fixes: job-skill extraction only ever scanned for skills that
+# SOME profile already had (_get_all_known_skills), so a job's detected
+# "required skills" set (the denominator of the skill-match score) could
+# be almost entirely made of skills nobody in the system has declared -
+# e.g. a Localization Engineer posting asking for CrowdIn/XLIFF/ICU/i18n
+# would detect zero of its real requirements if no profile happened to
+# list those, making the job look like a 100% skill match off one or two
+# incidental mentions (Python, Docker) instead of the dozen things it
+# actually needs. This list is still necessarily incomplete - it can't
+# anticipate every possible skill a posting might name - but it removes
+# the structural dependency on "did some other user happen to type this
+# exact word into their profile."
+BASELINE_SKILLS: List[str] = [
+    # Languages
+    "Python", "Java", "JavaScript", "TypeScript", "C++", "C#", "Go", "Rust",
+    "PHP", "Ruby", "Swift", "Kotlin", "Scala", "R", "Bash",
+    # Web / frontend
+    "HTML", "CSS", "React", "Angular", "Vue", "Node.js",
+    # Data / analytics / BI
+    "SQL", "Excel", "Power BI", "Tableau", "ETL", "Airflow", "PostgreSQL",
+    "MySQL", "MongoDB", "Spark", "Machine Learning", "NLP",
+    # Cloud / infra / devops
+    "AWS", "Azure", "GCP", "Docker", "Kubernetes", "Git", "Jenkins",
+    "GitHub Actions", "GitLab CI", "CI/CD", "REST API", "GraphQL",
+    "Webhooks", "Terraform",
+    # Localization / internationalization (the category that was
+    # entirely missing before and motivated this fix)
+    "Localization", "Internationalization", "i18n", "l10n", "CrowdIn",
+    "XLIFF", "ICU", "Unicode", "Gettext", "RTL",
+    # Product / design / collaboration
+    "Figma", "Photoshop", "Illustrator", "JSON", "YAML", "XML", "Agile",
+    "Scrum", "Jira",
+    # Sales / marketing / CRM
+    "Salesforce", "HubSpot", "SEO", "Google Analytics",
+]
+
+
+def _skill_universe(known_skills: List[str]) -> List[str]:
+    """Skills to scan a job for: every profile-declared skill, plus the
+    baseline vocabulary above - deduplicated case-insensitively, keeping
+    whichever spelling appears first (profile spelling wins, since
+    that's the one that needs to match a candidate's own stored skill)."""
+    seen = set()
+    combined = []
+    for skill in list(known_skills) + BASELINE_SKILLS:
+        key = skill.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append(skill)
+    return combined
+
+
+# Minimum years-of-experience patterns, most specific first. Each
+# capture group is a lower-bound number of years; where a posting gives
+# a range ("5-7 years") we take the lower bound, since that's the actual
+# minimum bar a candidate needs to clear.
+_YEARS_PATTERNS = [
+    re.compile(r"(\d+)\s*\+\s*years?"),                                   # "6+ years"
+    re.compile(r"(\d+)\s*(?:-|to)\s*\d+\s*years?"),                        # "5-7 years" / "5 to 7 years"
+    re.compile(r"(?:minimum|min\.?|at least)\s*(?:of\s*)?(\d+)\s*years?"),  # "at least 3 years"
+    re.compile(r"(\d+)\s*years?\s*(?:of\s*)?(?:dedicated\s+)?experience"),  # "6 years of experience"
+]
+
+
+def extract_required_years_experience(description: str) -> Optional[int]:
+    """Extract the minimum years-of-experience requirement stated in a
+    job description, if any. Returns None when no such requirement is
+    stated in recognizable form - not 0, since "not stated" and
+    "explicitly wants 0 years" are different things and the caller
+    (calculate_experience_score) treats them differently.
+
+    Where multiple year figures are found, the lowest is used - a
+    posting rarely gives more than one *minimum*, and taking the lowest
+    avoids accidentally picking up an unrelated larger number (like a
+    team size or a founding year) that one of the patterns loosely caught.
+    """
+    if not description:
+        return None
+
+    text = description.lower()
+    candidates = []
+    for pattern in _YEARS_PATTERNS:
+        for m in pattern.finditer(text):
+            try:
+                candidates.append(int(m.group(1)))
+            except (ValueError, IndexError):
+                continue
+
+    if not candidates:
+        return None
+    return min(candidates)
 
 
 def _skill_pattern(skill: str) -> str:
@@ -58,15 +155,47 @@ def detect_seniority_level(title: str, description: str) -> str:
 
     Same keyword-based approach as the original project's
     parse_seniority_level - checked in most-specific-first order so
-    "Senior" isn't accidentally missed by a looser earlier match.
-    """
-    combined = f"{title or ''} {description or ''}".lower()
+    "Senior" isn't accidentally missed by a looser earlier match - but
+    matched on whole words, not bare substrings.
 
-    if "senior" in combined or "lead" in combined:
+    Bug this fixes: plain substring checks matched "intern" inside
+    "international"/"internal"/"internet" (and inside the German
+    "intern"/"interne"/"internen", meaning "internal" - very common in
+    German postings), "mid" inside "middleware"/"midsize", and "lead"
+    inside "leading"/"leadership"/"leader" in phrases like "a leading
+    provider of..." - each silently mislabeling postings.
+
+    Word-boundary matching fixes all of those. It does NOT fully solve
+    "intern": German also uses "intern" as a standalone adjective
+    meaning "internal" (e.g. "Diese Position ist intern"), which is
+    spelled identically to the English noun and can't be told apart by
+    word-boundary matching alone. To avoid that false positive, a bare
+    "intern" is only treated as a Junior signal when it appears in the
+    job TITLE (real internship postings put it there - "Software
+    Engineering Intern"), not anywhere in the body text; the body text
+    instead relies on unambiguous signals ("internship", "praktikant",
+    "werkstudent", "trainee").
+    """
+    title_lower = (title or "").lower()
+    combined = f"{title_lower} {description or ''}".lower()
+
+    def has_word(pattern: str) -> bool:
+        return re.search(pattern, combined) is not None
+
+    if has_word(r"\bsenior\b") or has_word(r"\blead\b"):
         return "Senior"
-    if "mid" in combined or "intermediate" in combined:
+    if has_word(r"\bmid\b") or has_word(r"\bmid-level\b") or has_word(r"\bintermediate\b"):
         return "Mid-level"
-    if "junior" in combined or "entry" in combined or "intern" in combined or "graduate" in combined:
+    if (
+        has_word(r"\bjunior\b")
+        or has_word(r"\bentry\b")
+        or has_word(r"\bgraduate\b")
+        or has_word(r"\btrainee\b")
+        or has_word(r"\binternship\b")
+        or has_word(r"\bpraktikant\w*\b")
+        or has_word(r"\bwerkstudent\w*\b")
+        or re.search(r"\bintern\b", title_lower)
+    ):
         return "Junior"
     return "Not Specified"
 
@@ -89,10 +218,11 @@ def _load_profiles(cur) -> Dict[int, CandidateProfile]:
 
 def _load_jobs(cur) -> Dict[int, JobPosting]:
     cur.execute(
-        "SELECT job_id, title_clean, seniority_level FROM cleaned_job_postings WHERE is_active = TRUE"
+        "SELECT job_id, title_clean, seniority_level, required_years_experience "
+        "FROM cleaned_job_postings WHERE is_active = TRUE"
     )
     jobs = {}
-    for job_id, title, seniority_level in cur.fetchall():
+    for job_id, title, seniority_level, required_years_experience in cur.fetchall():
         cur.execute("SELECT skill_name FROM job_skills WHERE job_id = %s", (job_id,))
         skills = [r[0] for r in cur.fetchall()]
         cur.execute(
@@ -103,26 +233,32 @@ def _load_jobs(cur) -> Dict[int, JobPosting]:
         jobs[job_id] = JobPosting(
             job_id=job_id, title=title, skills=skills, language_requirements=lang_reqs,
             seniority_level=seniority_level or "Not Specified",
+            required_years_experience=required_years_experience,
         )
     return jobs
 
 
 def _get_all_known_skills(cur) -> List[str]:
-    """Every distinct skill declared across all active profiles - these
-    are the only skills that could ever matter for scoring anyone right
-    now, so this is what job postings get scanned for. Dynamic by
-    design: a hardcoded list can never cover every user's actual skill
-    set on a multi-user product."""
+    """Every distinct skill declared across all active profiles, combined
+    with the baseline vocabulary (see _skill_universe/BASELINE_SKILLS)
+    that's scanned for on every job regardless of what any profile has
+    declared. Dynamic by design on the profile side: a hardcoded list
+    can never cover every user's actual skill set on a multi-user
+    product, but relying SOLELY on profile-declared skills meant a
+    job's detected requirements could never include anything no one
+    had typed into a profile yet (see BASELINE_SKILLS for the bug this
+    fixes)."""
     cur.execute("SELECT DISTINCT unnest(skills) FROM candidate_profiles")
-    return [row[0] for row in cur.fetchall()]
+    profile_skills = [row[0] for row in cur.fetchall()]
+    return _skill_universe(profile_skills)
 
 
 def ensure_job_metadata(cur, job_id: int, title: str, description: str, known_skills: List[str]) -> None:
-    """Extract and store skills, language requirements, and seniority
-    level for a job.
+    """Extract and store skills, language requirements, seniority level,
+    and required years of experience for a job.
 
     Always re-scans (safe - inserts are ON CONFLICT DO NOTHING, and the
-    seniority UPDATE is idempotent) rather than skipping already-
+    seniority/years UPDATE is idempotent) rather than skipping already-
     processed jobs, so a newly-added skill (e.g. from a new user's
     profile) gets picked up on already-scraped jobs too, not just
     future ones.
@@ -148,9 +284,10 @@ def ensure_job_metadata(cur, job_id: int, title: str, description: str, known_sk
         )
 
     seniority = detect_seniority_level(title, description)
+    required_years = extract_required_years_experience(description)
     cur.execute(
-        "UPDATE cleaned_job_postings SET seniority_level = %s WHERE job_id = %s",
-        (seniority, job_id),
+        "UPDATE cleaned_job_postings SET seniority_level = %s, required_years_experience = %s WHERE job_id = %s",
+        (seniority, required_years, job_id),
     )
 
 
